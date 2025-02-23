@@ -83,9 +83,9 @@ jobs:
       - name: Setup cuDSS
         if: matrix.gpu == 'cuda'
         run: |
-          wget https://developer.download.nvidia.com/compute/cudss/redist/libcudss/linux-x86_64/libcudss-linux-x86_64-0.3.0.9_cuda12-archive.tar.xz
-          tar -xf libcudss-linux-x86_64-0.3.0.9_cuda12-archive.tar.xz
-          echo "cudss_DIR=${{github.workspace}}/libcudss-linux-x86_64-0.3.0.9_cuda12-archive/lib/cmake/cudss" >> $GITHUB_ENV
+          wget https://developer.download.nvidia.com/compute/cudss/redist/libcudss/linux-x86_64/libcudss-linux-x86_64-0.5.0.16_cuda12-archive.tar.xz
+          tar -xf libcudss-linux-x86_64-0.5.0.16_cuda12-archive.tar.xz
+          echo "cudss_DIR=${{github.workspace}}/libcudss-linux-x86_64-0.5.0.16_cuda12-archive/lib/cmake/cudss" >> $GITHUB_ENV
 
       - name: Cache Mold
         id: cache-mold
