@@ -51,14 +51,11 @@ jobs:
         with:
           submodules: recursive
 
-      # nvidia cuda toolkit + gcc combo shipped with 22.04LTS is broken
-      # and is not able to compile code that uses thrust
-      # https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1006962
       - name: Setup CUDA Toolkit Repositories (22.04)
         if: matrix.gpu == 'cuda' && matrix.os == 'ubuntu:22.04'
         run: |
-          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb
-          dpkg -i cuda-keyring_1.0-1_all.deb
+          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          dpkg -i cuda-keyring_1.1-1_all.deb
 
       - name: Setup CUDA Toolkit Repositories (24.04)
         if: matrix.gpu == 'cuda' && matrix.os == 'ubuntu:24.04'
@@ -66,26 +63,19 @@ jobs:
           wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
           dpkg -i cuda-keyring_1.1-1_all.deb
 
-      - name: Setup CUDA Toolkit (<24.04)
-        if: matrix.gpu == 'cuda' && matrix.os != 'ubuntu:24.04'
+      - name: Setup CUDA Compiler
+        if: matrix.gpu == 'cuda'
         run: |
           apt-get update
-          apt-get install -y cuda
-          echo "CUDACXX=/usr/local/cuda/bin/nvcc" >> $GITHUB_ENV
-
-      - name: Setup CUDA Toolkit (>=24.04)
-        if: matrix.gpu == 'cuda' && matrix.os == 'ubuntu:24.04'
-        run: |
-          apt-get update
-          apt-get install -y nvidia-cuda-toolkit
-          echo "CUDACXX=/usr/lib/nvidia-cuda-toolkit/bin/nvcc" >> $GITHUB_ENV
+          apt-get install -y cuda-compiler-13-1 cuda-libraries-dev-13-1
+          echo "CUDACXX=/usr/local/cuda-13.1/bin/nvcc" >> $GITHUB_ENV
 
       - name: Setup cuDSS
         if: matrix.gpu == 'cuda'
         run: |
-          wget https://developer.download.nvidia.com/compute/cudss/redist/libcudss/linux-x86_64/libcudss-linux-x86_64-0.3.0.9_cuda12-archive.tar.xz
-          tar -xf libcudss-linux-x86_64-0.3.0.9_cuda12-archive.tar.xz
-          echo "cudss_DIR=${{github.workspace}}/libcudss-linux-x86_64-0.3.0.9_cuda12-archive/lib/cmake/cudss" >> $GITHUB_ENV
+          wget https://developer.download.nvidia.com/compute/cudss/redist/libcudss/linux-x86_64/libcudss-linux-x86_64-0.7.1.4_cuda13-archive.tar.xz
+          tar -xf libcudss-linux-x86_64-0.7.1.4_cuda13-archive.tar.xz
+          echo "cudss_DIR=${{github.workspace}}/libcudss-linux-x86_64-0.7.1.4_cuda13-archive/lib/cmake/cudss" >> $GITHUB_ENV
 
       - name: Cache Mold
         id: cache-mold
