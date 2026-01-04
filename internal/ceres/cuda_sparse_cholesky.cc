@@ -107,6 +107,10 @@ class CERES_NO_EXPORT CuDSSMatrixBase {
 
   cudssMatrix_t Get() const noexcept { return matrix_; }
 
+  cudssStatus_t SetValues(void* values) {
+    return cudssMatrixSetValues(matrix_, values);
+  }
+
  protected:
   cudssMatrix_t matrix_{nullptr};
 };
@@ -166,6 +170,12 @@ class CERES_NO_EXPORT CuDSSMatrixDense : public CuDSSMatrixBase {
 struct CudssContext {
   CudssContext(cudssHandle_t cudss_handle) : cudss_handle_(cudss_handle) {
     CUDSS_STATUS_CHECK(cudssConfigCreate(&solver_config_));
+    int cudss_config_hybrid_execute_mode = 1;
+    CUDSS_STATUS_CHECK(
+        cudssConfigSet(solver_config_,
+                       CUDSS_CONFIG_HYBRID_EXECUTE_MODE,
+                       &cudss_config_hybrid_execute_mode,
+                       sizeof(cudss_config_hybrid_execute_mode)));
     CUDSS_STATUS_CHECK(cudssDataCreate(cudss_handle_, &solver_data_));
   }
   CudssContext(const CudssContext&) = delete;
@@ -190,13 +200,7 @@ class CERES_NO_EXPORT CudaSparseCholeskyImpl final : public SparseCholesky {
   static constexpr cudaDataType_t kCuDSSScalar =
       std::is_same_v<Scalar, float> ? CUDA_R_32F : CUDA_R_64F;
 
-  CudaSparseCholeskyImpl(ContextImpl* context)
-      : context_(context),
-        lhs_cols_d_(context_),
-        lhs_rows_d_(context_),
-        lhs_values_d_(context_),
-        rhs_d_(context_),
-        x_d_(context_) {}
+  CudaSparseCholeskyImpl(ContextImpl* context) : context_(context) {}
   CudaSparseCholeskyImpl(const CudaSparseCholeskyImpl&) = delete;
   CudaSparseCholeskyImpl(CudaSparseCholeskyImpl&&) = delete;
   CudaSparseCholeskyImpl& operator=(const CudaSparseCholeskyImpl&) = delete;
@@ -234,7 +238,17 @@ class CERES_NO_EXPORT CudaSparseCholeskyImpl final : public SparseCholesky {
     }
     CHECK_NE(cudss_context_.get(), nullptr);
 
-    ConvertAndCopyToDevice(lhs->values(), lhs_values_h_.data(), lhs_values_d_);
+    if constexpr (std::is_same_v<Scalar, float>) {
+      const auto num_nonzeros = lhs->num_nonzeros();
+      const auto num_rows = lhs->num_rows();
+      lhs_values_.resize(num_nonzeros);
+      rhs_.resize(num_rows);
+      x_.resize(num_rows);
+      Convert(lhs->values(), lhs_values_.data(), num_nonzeros);
+      cudss_lhs_.SetValues(lhs_values_.data());
+    } else {
+      cudss_lhs_.SetValues(const_cast<double*>(lhs->values()));
+    }
 
     CUDSS_STATUS_OK_OR_RETURN_FATAL_ERROR(
         cudssExecute(context_->cudss_handle_,
@@ -274,7 +288,14 @@ class CERES_NO_EXPORT CudaSparseCholeskyImpl final : public SparseCholesky {
       return factorize_result_;
     }
 
-    ConvertAndCopyToDevice(rhs, rhs_h_.data(), rhs_d_);
+    if constexpr (std::is_same_v<Scalar, float>) {
+      Convert(rhs, rhs_.data(), rhs_.size());
+      cudss_rhs_.SetValues(rhs_.data());
+      cudss_x_.SetValues(x_.data());
+    } else {
+      cudss_rhs_.SetValues(const_cast<double*>(rhs));
+      cudss_x_.SetValues(solution);
+    }
 
     CUDSS_STATUS_OK_OR_RETURN_FATAL_ERROR(
         cudssExecute(context_->cudss_handle_,
@@ -286,7 +307,9 @@ class CERES_NO_EXPORT CudaSparseCholeskyImpl final : public SparseCholesky {
                      cudss_rhs_.Get()),
         "cudssExecute with CUDSS_PHASE_SOLVE failed");
 
-    ConvertAndCopyToHost(x_d_, x_h_.data(), solution);
+    if constexpr (std::is_same_v<Scalar, float>) {
+      Convert(x_.data(), solution, x_.size());
+    }
 
     int cudss_data_info;
     CUDSS_STATUS_OK_OR_RETURN_FATAL_ERROR(
@@ -325,9 +348,6 @@ class CERES_NO_EXPORT CudaSparseCholeskyImpl final : public SparseCholesky {
       return status;
     }
 
-    lhs_rows_d_.CopyFromCpu(lhs->rows(), lhs->num_rows() + 1);
-    lhs_cols_d_.CopyFromCpu(lhs->cols(), lhs->num_nonzeros());
-
     // Analyze and factorization results are stored in cudssData_t (managed by
     // CudssContext). Given that cuDSS 0.3.0 does not reset it's error state in
     // case of failed numerics at factorization stage, we have to reset
@@ -356,39 +376,28 @@ class CERES_NO_EXPORT CudaSparseCholeskyImpl final : public SparseCholesky {
     const auto num_rows = lhs->num_rows();
     const auto num_nonzeros = lhs->num_nonzeros();
 
-    if constexpr (std::is_same_v<Scalar, float>) {
-      lhs_values_h_.Reserve(num_nonzeros);
-      rhs_h_.Reserve(num_rows);
-      x_h_.Reserve(num_rows);
-    }
-
-    lhs_rows_d_.Reserve(num_rows + 1);
-    lhs_cols_d_.Reserve(num_nonzeros);
-    lhs_values_d_.Reserve(num_nonzeros);
-    rhs_d_.Reserve(num_rows);
-    x_d_.Reserve(num_rows);
-
     static constexpr auto kFailedToCreateCuDSSMatrix =
         "cudssMatrixCreate() call failed";
-    CUDSS_STATUS_OK_OR_RETURN_FATAL_ERROR(cudss_lhs_.Reset(num_rows,
-                                                           num_rows,
-                                                           num_nonzeros,
-                                                           lhs_rows_d_.data(),
-                                                           nullptr,
-                                                           lhs_cols_d_.data(),
-                                                           lhs_values_d_.data(),
-                                                           CUDA_R_32I,
-                                                           kCuDSSScalar,
-                                                           CUDSS_MTYPE_SPD,
-                                                           CUDSS_MVIEW_LOWER,
-                                                           CUDSS_BASE_ZERO),
-                                          kFailedToCreateCuDSSMatrix);
+    CUDSS_STATUS_OK_OR_RETURN_FATAL_ERROR(
+        cudss_lhs_.Reset(num_rows,
+                         num_rows,
+                         num_nonzeros,
+                         const_cast<int*>(lhs->rows()),
+                         nullptr,
+                         const_cast<int*>(lhs->cols()),
+                         nullptr,
+                         CUDA_R_32I,
+                         kCuDSSScalar,
+                         CUDSS_MTYPE_SPD,
+                         CUDSS_MVIEW_LOWER,
+                         CUDSS_BASE_ZERO),
+        kFailedToCreateCuDSSMatrix);
 
     CUDSS_STATUS_OK_OR_RETURN_FATAL_ERROR(
         cudss_rhs_.Reset(num_rows,
                          1,
                          num_rows,
-                         rhs_d_.data(),
+                         nullptr,
                          kCuDSSScalar,
                          CUDSS_LAYOUT_COL_MAJOR),
         kFailedToCreateCuDSSMatrix);
@@ -397,7 +406,7 @@ class CERES_NO_EXPORT CudaSparseCholeskyImpl final : public SparseCholesky {
         cudss_x_.Reset(num_rows,
                        1,
                        num_rows,
-                       x_d_.data(),
+                       nullptr,
                        kCuDSSScalar,
                        CUDSS_LAYOUT_COL_MAJOR),
         kFailedToCreateCuDSSMatrix);
@@ -442,14 +451,9 @@ class CERES_NO_EXPORT CudaSparseCholeskyImpl final : public SparseCholesky {
   CuDSSMatrixDense cudss_rhs_;
   CuDSSMatrixDense cudss_x_;
 
-  CudaPinnedHostBuffer<Scalar> lhs_values_h_;
-  CudaPinnedHostBuffer<Scalar> rhs_h_;
-  CudaPinnedHostBuffer<Scalar> x_h_;
-  CudaBuffer<int> lhs_rows_d_;
-  CudaBuffer<int> lhs_cols_d_;
-  CudaBuffer<Scalar> lhs_values_d_;
-  CudaBuffer<Scalar> rhs_d_;
-  CudaBuffer<Scalar> x_d_;
+  Eigen::Vector<Scalar, Eigen::Dynamic> lhs_values_;
+  Eigen::Vector<Scalar, Eigen::Dynamic> rhs_;
+  Eigen::Vector<Scalar, Eigen::Dynamic> x_;
 
   LinearSolverTerminationType analyze_result_ =
       LinearSolverTerminationType::FATAL_ERROR;
